@@ -1,0 +1,42 @@
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.1.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.1.0 
+          http://maven.apache.org/xsd/assembly-2.1.0.xsd">
+    <id>plugin</id>
+    <formats>
+        <format>zip</format>
+    </formats>
+    <includeBaseDirectory>false</includeBaseDirectory>
+    
+    <fileSets>
+        <!-- Main JAR with classes -->
+        <fileSet>
+            <directory>${project.build.directory}</directory>
+            <includes>
+                <include>${project.build.finalName}.jar</include>
+            </includes>
+            <outputDirectory>/</outputDirectory>
+        </fileSet>
+        
+        <!-- Resources (META-INF/plugin.xml, JS files) -->
+        <fileSet>
+            <directory>${project.basedir}/src/main/resources</directory>
+            <includes>
+                <include>**/*</include>
+            </includes>
+            <outputDirectory>/</outputDirectory>
+        </fileSet>
+    </fileSets>
+    
+    <dependencySets>
+        <dependencySet>
+            <outputDirectory>/lib</outputDirectory>
+            <useProjectArtifact>false</useProjectArtifact>
+            <scope>runtime</scope>
+            <excludes>
+                <exclude>com.jetbrains.intellij.idea:ideaIC</exclude>
+            </excludes>
+            <unpack>false</unpack>
+        </dependencySet>
+    </dependencySets>
+</assembly>
