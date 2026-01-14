@@ -16,6 +16,10 @@ class CamelRouteService(private val project: Project) {
     private val parser = CamelPsiParser(project)
 
     fun buildGraph(): CamelRouteGraph {
+        // Clear parser state before building a new graph
+        // This prevents state from previous builds from interfering
+        parser.clearState()
+        
         val graph = CamelRouteGraph()
         
         // Use a scope that includes both project files and library dependencies

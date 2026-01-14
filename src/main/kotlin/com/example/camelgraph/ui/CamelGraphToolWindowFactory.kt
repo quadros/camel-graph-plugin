@@ -25,6 +25,10 @@ class CamelGraphToolWindowFactory : ToolWindowFactory {
         
         val refreshButton = JButton("Refresh Graph")
         refreshButton.addActionListener {
+            // Disable button during processing to prevent multiple simultaneous calls
+            refreshButton.isEnabled = false
+            refreshButton.text = "Refreshing..."
+            
             try {
                 // Build graph by scanning the project for RouteBuilder classes
                 val graph = graphService.buildGraph()
@@ -92,7 +96,11 @@ class CamelGraphToolWindowFactory : ToolWindowFactory {
                     </body>
                     </html>
                 """.trimIndent()
-                browser.loadHTML(errorHtml)
+                    browser.loadHTML(errorHtml)
+            } finally {
+                // Re-enable button after processing completes (success or error)
+                refreshButton.isEnabled = true
+                refreshButton.text = "Refresh Graph"
             }
         }
         

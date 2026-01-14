@@ -13,6 +13,14 @@ class CamelPsiParser(private val project: Project) {
     
     // Map to store from() URIs for matching with to() endpoints
     private val fromUriToNodeId = mutableMapOf<String, String>()
+    
+    /**
+     * Clear the parser state before starting a new parsing session
+     * This ensures that multiple calls to buildGraph() don't interfere with each other
+     */
+    fun clearState() {
+        fromUriToNodeId.clear()
+    }
 
     fun parseProject(graph: CamelRouteGraph) {
         // In a real plugin, we would use a more efficient index search.

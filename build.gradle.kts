@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.github.gquad.camelgraph"
-version = "1.0-SNAPSHOT"
+version = "1.0.1"
 
 repositories {
     mavenCentral()
@@ -36,7 +36,7 @@ tasks {
 
     patchPluginXml {
         sinceBuild.set("232") // IntelliJ IDEA 2023.2
-        untilBuild.set("242.*") // Up to IntelliJ IDEA 2024.2
+        untilBuild.set("251.*") // Up to IntelliJ IDEA 2025.1
     }
 
     // Configurações opcionais para publicação no JetBrains Marketplace

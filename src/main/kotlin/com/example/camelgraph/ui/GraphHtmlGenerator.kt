@@ -55,14 +55,94 @@ object GraphHtmlGenerator {
                         color: #a9b7c6; 
                     }
                     #cy { width: 100vw; height: 100vh; display: block; }
+                    
+                    /* Zoom Controls */
+                    .zoom-controls {
+                        position: absolute;
+                        top: 20px;
+                        right: 20px;
+                        z-index: 1000;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 5px;
+                    }
+                    
+                    .zoom-btn {
+                        width: 40px;
+                        height: 40px;
+                        background-color: #3c3c3c;
+                        border: 2px solid #555;
+                        border-radius: 5px;
+                        color: #a9b7c6;
+                        font-size: 20px;
+                        font-weight: bold;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        font-family: "Comic Sans MS", "Comic Sans", cursive, sans-serif;
+                        transition: all 0.2s;
+                    }
+                    
+                    .zoom-btn:hover {
+                        background-color: #4c4c4c;
+                        border-color: #666;
+                        color: #fff;
+                    }
+                    
+                    .zoom-btn:active {
+                        background-color: #2c2c2c;
+                        transform: scale(0.95);
+                    }
+                    
+                    .zoom-btn:disabled {
+                        opacity: 0.5;
+                        cursor: not-allowed;
+                    }
+                    
+                    .zoom-reset {
+                        width: 40px;
+                        height: 30px;
+                        background-color: #3c3c3c;
+                        border: 2px solid #555;
+                        border-radius: 5px;
+                        color: #a9b7c6;
+                        font-size: 12px;
+                        font-weight: bold;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        font-family: "Comic Sans MS", "Comic Sans", cursive, sans-serif;
+                        transition: all 0.2s;
+                        margin-top: 5px;
+                    }
+                    
+                    .zoom-reset:hover {
+                        background-color: #4c4c4c;
+                        border-color: #666;
+                        color: #fff;
+                    }
+                    
+                    .zoom-reset:active {
+                        background-color: #2c2c2c;
+                        transform: scale(0.95);
+                    }
                 </style>
             </head>
             <body>
                 <div id="cy"></div>
+                <div class="zoom-controls">
+                    <button class="zoom-btn" id="zoom-in" title="Zoom In">+</button>
+                    <button class="zoom-btn" id="zoom-out" title="Zoom Out">−</button>
+                    <button class="zoom-reset" id="zoom-fit" title="Fit to Screen">Fit</button>
+                </div>
                 <script>
                     var cy = cytoscape({
                         container: document.getElementById('cy'),
                         elements: $elementsString,
+                        minZoom: 0.1,
+                        maxZoom: 3.0,
                         style: [
                             {
                                 selector: 'node',
@@ -138,6 +218,54 @@ object GraphHtmlGenerator {
                             animate: false
                         }
                     });
+                    
+                    // Zoom controls
+                    var zoomInBtn = document.getElementById('zoom-in');
+                    var zoomOutBtn = document.getElementById('zoom-out');
+                    var zoomFitBtn = document.getElementById('zoom-fit');
+                    
+                    // Zoom in
+                    zoomInBtn.addEventListener('click', function() {
+                        var currentZoom = cy.zoom();
+                        var newZoom = Math.min(currentZoom + 0.2, 3.0);
+                        cy.zoom(newZoom);
+                        updateZoomButtons();
+                    });
+                    
+                    // Zoom out
+                    zoomOutBtn.addEventListener('click', function() {
+                        var currentZoom = cy.zoom();
+                        var newZoom = Math.max(currentZoom - 0.2, 0.1);
+                        cy.zoom(newZoom);
+                        updateZoomButtons();
+                    });
+                    
+                    // Fit to screen
+                    zoomFitBtn.addEventListener('click', function() {
+                        cy.fit(cy.elements(), 50);
+                        updateZoomButtons();
+                    });
+                    
+                    // Update button states based on current zoom
+                    function updateZoomButtons() {
+                        var currentZoom = cy.zoom();
+                        zoomInBtn.disabled = (currentZoom >= 3.0);
+                        zoomOutBtn.disabled = (currentZoom <= 0.1);
+                    }
+                    
+                    // Enforce zoom limits on wheel and pinch events
+                    cy.on('zoom', function() {
+                        var currentZoom = cy.zoom();
+                        if (currentZoom < 0.1) {
+                            cy.zoom(0.1);
+                        } else if (currentZoom > 3.0) {
+                            cy.zoom(3.0);
+                        }
+                        updateZoomButtons();
+                    });
+                    
+                    // Initialize button states
+                    updateZoomButtons();
                 </script>
             </body>
             </html>
