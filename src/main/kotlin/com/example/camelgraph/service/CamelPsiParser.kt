@@ -11,16 +11,20 @@ import java.util.UUID
 
 class CamelPsiParser(private val project: Project) {
     
-    // Map to store from() URIs for matching with to() endpoints
-    private val fromUriToNodeId = mutableMapOf<String, String>()
+    private val fromUriToContainerId = mutableMapOf<String, String>()
     
     /**
      * Clear the parser state before starting a new parsing session
      * This ensures that multiple calls to buildGraph() don't interfere with each other
      */
     fun clearState() {
-        fromUriToNodeId.clear()
+        fromUriToContainerId.clear()
     }
+
+    data class ParseStats(
+        val configureMethods: Int,
+        val entrypoints: Int
+    )
 
     fun parseProject(graph: CamelRouteGraph) {
         // In a real plugin, we would use a more efficient index search.
@@ -31,85 +35,107 @@ class CamelPsiParser(private val project: Project) {
         // For the parser logic itself, we can expose a method to parse a single file.
     }
 
-    fun parseFile(psiFile: PsiJavaFile, graph: CamelRouteGraph) {
-        val classes = psiFile.classes
+    fun parseFile(psiFile: PsiJavaFile, graph: CamelRouteGraph): ParseStats {
+        // Important: in Spring projects it's common to declare routes using anonymous classes:
+        //   @Bean RoutesBuilder routes() { return new RouteBuilder() { public void configure() { ... } }; }
+        // `psiFile.classes` only includes top-level classes, so we must traverse inner + anonymous classes too.
+        val classes = PsiTreeUtil.findChildrenOfType(psiFile, PsiClass::class.java)
+
+        var configureMethodsCount = 0
+        var entrypointsCount = 0
+
         for (clazz in classes) {
-            // Check if extends RouteBuilder (simple check by name or inheritance if resolved)
-            // Simpler check: look for configure method
+            // Look for configure() method (RouteBuilder / EndpointRouteBuilder Java DSL)
             val methods = clazz.findMethodsByName("configure", false)
+            configureMethodsCount += methods.size
             for (method in methods) {
-                parseConfigureMethod(method, graph, psiFile.virtualFile.path)
+                entrypointsCount += parseConfigureMethod(method, graph, psiFile.virtualFile.path, clazz)
             }
         }
+
+        return ParseStats(configureMethods = configureMethodsCount, entrypoints = entrypointsCount)
     }
     
-    /**
-     * Create edges for to() -> from() connections after all files are parsed
-     * This should be called after parsing all files
-     */
-    fun createToFromConnections(graph: CamelRouteGraph) {
-        // Find all endpoint nodes (to() calls) and check if they match any from() URIs
-        val endpointNodes = graph.nodes.values.filter { it.type == NodeType.ENDPOINT }
-        
-        for (endpointNode in endpointNodes) {
-            // Extract URI from label (assuming label contains the URI)
-            // Need to decode HTML entities
-            val uri = endpointNode.label
-                .replace("&lt;", "<")
-                .replace("&gt;", ">")
-                .replace("&amp;", "&")
-                .replace("&quot;", "\"")
-            
-            val targetFromNodeId = fromUriToNodeId[uri]
-            
-            if (targetFromNodeId != null) {
-                // Find the source node (the one that has an edge to this endpoint)
-                val sourceEdge = graph.edges.find { it.targetId == endpointNode.id }
-                if (sourceEdge != null) {
-                    // Create edge from source to the target from() node
-                    // Remove the intermediate endpoint node edge and create direct connection
-                    graph.edges.removeIf { it.sourceId == sourceEdge.sourceId && it.targetId == endpointNode.id }
-                    graph.addEdge(sourceEdge.sourceId, targetFromNodeId, "→ ${endpointNode.label}")
-                }
-            }
-        }
-    }
+    // NOTE: Cross-file route linking is now achieved by using deterministic node IDs for URIs.
+    // When `.to("direct:X")` and `from("direct:X")` share the same node id, flows connect naturally.
 
-    private fun parseConfigureMethod(method: PsiMethod, graph: CamelRouteGraph, filePath: String) {
-        // We are looking for method calls starting with "from"
-        val body = method.body ?: return
+    private fun parseConfigureMethod(method: PsiMethod, graph: CamelRouteGraph, filePath: String, clazz: PsiClass): Int {
+        // We are looking for route "entrypoints" in Camel DSL.
+        // Common ones:
+        // - from(...)
+        // - fromD(...) (dynamic from)
+        // - fromF(...) (formatted from)
+        // - rest(...) (REST DSL entry)
+        val body = method.body ?: return 0
+
+        var entrypoints = 0
         
         body.accept(object : JavaRecursiveElementVisitor() {
             override fun visitMethodCallExpression(expression: PsiMethodCallExpression) {
                 super.visitMethodCallExpression(expression)
                 
                 val methodName = expression.methodExpression.referenceName
-                if (methodName == "from") {
-                    // Start of a route
+                val isFromEntrypoint = methodName == "from" || methodName == "fromD" || methodName == "fromF"
+                val isRestEntrypoint = methodName == "rest"
+                if (isFromEntrypoint || isRestEntrypoint) {
+                    // Start of a route (Java DSL) or REST DSL chain
                     val (uri, _) = extractUriArgument(expression)
                     if (uri.isNotEmpty()) {
+                        entrypoints += 1
                         val sanitizedUri = SecurityUtils.sanitizeUri(uri)
-                        val sanitizedLabel = SecurityUtils.sanitizeLabel(sanitizedUri)
-                        val nodeId = UUID.randomUUID().toString()
+                        val labelPrefix = if (isRestEntrypoint) "rest:" else ""
+                        val sanitizedLabel = SecurityUtils.sanitizeLabel(labelPrefix + sanitizedUri)
+
                         // Use baseDir.path for compatibility with IntelliJ 2023.2+
                         // basePath is available in 2024.1+, but baseDir.path works in all versions
                         val projectBasePath = project.baseDir?.path
                         val sanitizedFilePath = SecurityUtils.sanitizeFilePath(filePath, projectBasePath)
-                        val startNode = CamelNode(nodeId, sanitizedLabel, NodeType.ROUTE_START, sanitizedFilePath, getLineNumber(expression))
+                        val containerId = containerNodeId(sanitizedFilePath, clazz.name ?: "Routes")
+                        graph.addNode(
+                            CamelNode(
+                                id = containerId,
+                                label = SecurityUtils.sanitizeLabel(clazz.name ?: (sanitizedFilePath ?: "Routes")),
+                                type = NodeType.CONTAINER,
+                                parentId = null,
+                                filePath = sanitizedFilePath,
+                                lineNumber = -1
+                            )
+                        )
+
+                        val nodeId = uriNodeId(sanitizedUri)
+                        val startNode = CamelNode(
+                            id = nodeId,
+                            label = sanitizedLabel,
+                            type = NodeType.ROUTE_START,
+                            parentId = containerId,
+                            filePath = sanitizedFilePath,
+                            lineNumber = getLineNumber(expression)
+                        )
                         graph.addNode(startNode)
-                        
-                        // Store the from URI for later matching with to() endpoints
-                        fromUriToNodeId[sanitizedUri] = nodeId
+
+                        // Only store "from*" URIs for later matching with to() endpoints.
+                        // REST DSL is not a direct endpoint URI in the same sense as from("direct:...").
+                        if (isFromEntrypoint) {
+                            fromUriToContainerId[sanitizedUri] = containerId
+                        }
                         
                         // Parse the chain
-                        parseRouteChain(expression, startNode, graph, filePath)
+                        parseRouteChain(expression, startNode, graph, filePath, containerId)
                     }
                 }
             }
         })
+
+        return entrypoints
     }
 
-    private fun parseRouteChain(startExpression: PsiMethodCallExpression, startNode: CamelNode, graph: CamelRouteGraph, filePath: String) {
+    private fun parseRouteChain(
+        startExpression: PsiMethodCallExpression,
+        startNode: CamelNode,
+        graph: CamelRouteGraph,
+        filePath: String,
+        currentContainerId: String
+    ) {
         var currentPreviousNode = startNode
         
         // The chain in Java PSI is nested inverse.
@@ -130,6 +156,8 @@ class CamelPsiParser(private val project: Project) {
         var currentExpr: PsiElement = startExpression
         var insideChoice = false
         var choiceDepth = 0
+        var insideParallel = false
+        var parallelNodeId: String? = null
         
         while (true) {
             // Look for the parent method call
@@ -164,6 +192,14 @@ class CamelPsiParser(private val project: Project) {
                              }
                          }
                      }
+
+                     // Exit parallelProcessing block at end()
+                     if (methodName == "end" && insideParallel) {
+                         insideParallel = false
+                         parallelNodeId = null
+                         currentExpr = grandParent
+                         continue
+                     }
                      
                      // Skip methods that are part of choice structure (they are handled separately)
                      // Also skip methods that don't create nodes
@@ -184,22 +220,39 @@ class CamelPsiParser(private val project: Project) {
                      val (argValue, _) = extractUriArgument(grandParent)
                      val sanitizedArg = SecurityUtils.sanitizeUri(argValue)
                      val label = if (sanitizedArg.isNotEmpty()) SecurityUtils.sanitizeLabel(sanitizedArg) else methodName
-                     val nodeId = UUID.randomUUID().toString()
                      
                      var nodeType = NodeType.UNKNOWN
                      var nodeLabel = label
+                     var nodeId: String? = null
+                     var parentId: String? = currentContainerId
                      
                      if (methodName == "to" || methodName == "toD") {
                          nodeType = NodeType.ENDPOINT
+                         if (sanitizedArg.isNotEmpty()) {
+                             nodeId = uriNodeId(sanitizedArg)
+                             // If this endpoint is a reference to a route defined elsewhere, pin it to that container
+                             parentId = fromUriToContainerId[sanitizedArg] ?: currentContainerId
+                         }
                      } else if (methodName == "bean") {
                          nodeType = NodeType.BEAN
                          // Extract method name from bean() call
                          nodeLabel = extractBeanMethodName(grandParent)
+                         nodeId = UUID.randomUUID().toString()
                      } else if (methodName == "process") {
                          nodeType = NodeType.PROCESSOR
+                         nodeId = UUID.randomUUID().toString()
                      } else if (methodName == "choice") {
                          nodeType = NodeType.CHOICE
                          nodeLabel = "choice"
+                         nodeId = UUID.randomUUID().toString()
+                     } else if (methodName == "parallelProcessing") {
+                         nodeType = NodeType.PARALLEL_PROCESSING
+                         nodeLabel = "parallel"
+                         nodeId = UUID.randomUUID().toString()
+                     } else if (methodName == "doCatch") {
+                         nodeType = NodeType.DO_CATCH
+                         nodeLabel = extractDoCatchLabel(grandParent)
+                         nodeId = UUID.randomUUID().toString()
                      }
                      // Ignore others for now or map to generic
                      
@@ -208,28 +261,49 @@ class CamelPsiParser(private val project: Project) {
                         // basePath is available in 2024.1+, but baseDir.path works in all versions
                         val projectBasePath = project.baseDir?.path
                         val sanitizedFilePath = SecurityUtils.sanitizeFilePath(filePath, projectBasePath)
-                         val newNode = CamelNode(nodeId, SecurityUtils.sanitizeLabel(nodeLabel), nodeType, sanitizedFilePath, getLineNumber(grandParent))
+                         val finalNodeId = nodeId ?: UUID.randomUUID().toString()
+                         val newNode = CamelNode(
+                             id = finalNodeId,
+                             label = SecurityUtils.sanitizeLabel(nodeLabel),
+                             type = nodeType,
+                             parentId = parentId,
+                             filePath = sanitizedFilePath,
+                             lineNumber = getLineNumber(grandParent)
+                         )
                          graph.addNode(newNode)
-                         graph.addEdge(currentPreviousNode.id, newNode.id)
-                         currentPreviousNode = newNode
+
+                         // For parallelProcessing block, endpoints should branch from the parallel node
+                         val parallelSourceId = if (insideParallel) parallelNodeId else null
+                         val sourceId = if (nodeType == NodeType.ENDPOINT && parallelSourceId != null) {
+                             parallelSourceId
+                         } else {
+                             currentPreviousNode.id
+                         }
+                         graph.addEdge(sourceId, newNode.id)
+
+                         // Do NOT advance the sequential chain when adding endpoints inside parallelProcessing,
+                         // otherwise you'd get to(A) -> to(B) instead of parallel -> A/B/...
+                         val advancesChain = !(nodeType == NodeType.ENDPOINT && insideParallel)
+                         if (advancesChain) {
+                             currentPreviousNode = newNode
+                         }
+
+                         if (nodeType == NodeType.PARALLEL_PROCESSING) {
+                             insideParallel = true
+                             parallelNodeId = newNode.id
+                         }
                          
                          // If this is a choice, parse its structure AFTER adding the node
                          if (nodeType == NodeType.CHOICE) {
-                             parseChoiceStructure(grandParent, nodeId, graph, filePath)
+                             parseChoiceStructure(grandParent, newNode.id, graph, filePath)
                              // After processing choice, skip everything until .end()
                              val endExpression = findMatchingEnd(grandParent)
                              if (endExpression != null) {
-                                 // Skip to after the end()
                                  currentExpr = endExpression
                                  continue
                              }
                          }
                          
-                         // Store endpoint URI for to() -> from() matching
-                         if (nodeType == NodeType.ENDPOINT && sanitizedArg.isNotEmpty()) {
-                             // Store with a prefix to identify it as a to() endpoint
-                             // We'll match this later with from() URIs
-                         }
                      }
                      
                      currentExpr = grandParent
@@ -254,6 +328,8 @@ class CamelPsiParser(private val project: Project) {
         var current: PsiElement? = choiceExpression
         var foundEnd = false
         
+        val choiceContainerId = graph.nodes[choiceNodeId]?.parentId
+
         while (current != null && !foundEnd) {
             val parent = current.parent
             if (parent is PsiReferenceExpression) {
@@ -265,10 +341,10 @@ class CamelPsiParser(private val project: Project) {
                         // Extract condition from when()
                         val condition = extractWhenCondition(grandParent)
                         // Find destination (to, bean, etc.) within this when branch
-                        findDestinationInBranch(grandParent, choiceNodeId, condition, graph, filePath)
+                        findDestinationInBranch(grandParent, choiceNodeId, condition, graph, filePath, choiceContainerId)
                     } else if (methodName == "otherwise") {
                         // Find destination within otherwise branch
-                        findDestinationInBranch(grandParent, choiceNodeId, "otherwise", graph, filePath)
+                        findDestinationInBranch(grandParent, choiceNodeId, "otherwise", graph, filePath, choiceContainerId)
                     } else if (methodName == "end") {
                         // Reached the end of choice, stop
                         foundEnd = true
@@ -308,7 +384,14 @@ class CamelPsiParser(private val project: Project) {
      * We need to navigate FORWARD in the chain (following qualifiers) to find to/bean/process
      * We should NOT use a recursive visitor as it will visit elements outside the branch
      */
-    private fun findDestinationInBranch(branchExpression: PsiMethodCallExpression, choiceNodeId: String, edgeLabel: String, graph: CamelRouteGraph, filePath: String) {
+    private fun findDestinationInBranch(
+        branchExpression: PsiMethodCallExpression,
+        choiceNodeId: String,
+        edgeLabel: String,
+        graph: CamelRouteGraph,
+        filePath: String,
+        defaultContainerId: String?
+    ) {
         // Navigate forward in the chain from when()/otherwise() to find destinations
         // Structure: when() -> log() -> to() or when() -> to()
         // We traverse by following the qualifier chain (parent -> reference -> method call)
@@ -341,23 +424,20 @@ class CamelPsiParser(private val project: Project) {
                             val sanitizedUri = SecurityUtils.sanitizeUri(uri)
                             val label = SecurityUtils.sanitizeLabel(sanitizedUri)
                             
-                            // Check if this to() points to a from() route
-                            var nodeId = fromUriToNodeId[sanitizedUri]
-                            
-                            if (nodeId == null) {
-                                // Create endpoint node
-                                nodeId = UUID.randomUUID().toString()
-                                val projectBasePath = project.baseDir?.path
-                                val sanitizedFilePath = SecurityUtils.sanitizeFilePath(null, projectBasePath)
-                                val endpointNode = CamelNode(
-                                    nodeId,
-                                    label,
-                                    NodeType.ENDPOINT,
-                                    sanitizedFilePath,
-                                    getLineNumber(grandParent)
+                            val nodeId = uriNodeId(sanitizedUri)
+                            val projectBasePath = project.baseDir?.path
+                            val sanitizedFilePath = SecurityUtils.sanitizeFilePath(filePath, projectBasePath)
+                            val parentId = fromUriToContainerId[sanitizedUri] ?: defaultContainerId
+                            graph.addNode(
+                                CamelNode(
+                                    id = nodeId,
+                                    label = label,
+                                    type = NodeType.ENDPOINT,
+                                    parentId = parentId,
+                                    filePath = sanitizedFilePath,
+                                    lineNumber = getLineNumber(grandParent)
                                 )
-                                graph.addNode(endpointNode)
-                            }
+                            )
                             
                             // Store the last destination found
                             destinationInfo = DestinationInfo(nodeId, label, NodeType.ENDPOINT)
@@ -371,6 +451,7 @@ class CamelPsiParser(private val project: Project) {
                             nodeId,
                             SecurityUtils.sanitizeLabel(beanMethodName),
                             NodeType.BEAN,
+                            defaultContainerId,
                             sanitizedFilePath,
                             getLineNumber(grandParent)
                         )
@@ -386,6 +467,7 @@ class CamelPsiParser(private val project: Project) {
                             nodeId,
                             SecurityUtils.sanitizeLabel("processor"),
                             NodeType.PROCESSOR,
+                            defaultContainerId,
                             sanitizedFilePath,
                             getLineNumber(grandParent)
                         )
@@ -450,7 +532,7 @@ class CamelPsiParser(private val project: Project) {
     /**
      * Extract method name from bean() call
      * bean(beanInstance, "methodName") -> "methodName"
-     * bean(beanInstance) -> "processor"
+     * bean(beanInstance) -> beanInstance (nome da variável / expressão) ou nome da classe quando possível
      */
     private fun extractBeanMethodName(beanExpression: PsiMethodCallExpression): String {
         val args = beanExpression.argumentList.expressions
@@ -469,8 +551,39 @@ class CamelPsiParser(private val project: Project) {
                 return text
             }
         }
-        // Default to "processor" if no method name specified
-        return "processor"
+
+        // No explicit method -> use the bean reference/class name (first argument), when available.
+        if (args.isNotEmpty()) {
+            val firstArg = args[0]
+
+            // Common patterns:
+            // - bean(processor) -> "processor"
+            // - bean(MyProcessor.class) -> "MyProcessor"
+            // - bean(someFactory.getBean()) -> "someFactory.getBean()"
+            val text = firstArg.text
+                .replace(".class", "")
+                .trim()
+
+            if (text.isNotEmpty()) {
+                // Try to prefer simple class name when the PSI type is resolvable.
+                // NOTE: `resolve()` exists on PsiClassType, not on PsiType.
+                val resolvedClassName = try {
+                    when (firstArg) {
+                        is PsiClassObjectAccessExpression ->
+                            (firstArg.operand.type as? PsiClassType)?.resolve()?.name
+                        else ->
+                            (firstArg.type as? PsiClassType)?.resolve()?.name
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+
+                return resolvedClassName ?: text
+            }
+        }
+
+        // Last resort
+        return "bean"
     }
     
 
@@ -498,5 +611,28 @@ class CamelPsiParser(private val project: Project) {
     private fun getLineNumber(element: PsiElement): Int {
          val document = PsiDocumentManager.getInstance(project).getDocument(element.containingFile)
          return document?.getLineNumber(element.textOffset)?.plus(1) ?: -1
+    }
+
+    private fun uriNodeId(uri: String): String {
+        val sanitized = SecurityUtils.sanitizeUri(uri)
+        // Keep IDs stable and safe for Cytoscape: avoid whitespace/control chars
+        val safe = sanitized.replace(Regex("\\s+"), "_")
+        return "uri:$safe"
+    }
+
+    private fun containerNodeId(sanitizedFilePath: String?, className: String): String {
+        val raw = (sanitizedFilePath ?: "unknown") + "::" + className
+        val safe = raw.replace(Regex("\\s+"), "_")
+        return "container:$safe"
+    }
+
+    private fun extractDoCatchLabel(doCatchExpression: PsiMethodCallExpression): String {
+        val args = doCatchExpression.argumentList.expressions
+        if (args.isEmpty()) return "doCatch"
+        val first = args.first().text
+            .replace("class", "")
+            .replace(".class", "")
+            .trim()
+        return if (first.isNotEmpty()) "doCatch($first)" else "doCatch"
     }
 }

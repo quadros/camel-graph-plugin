@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.github.gquad.camelgraph</id>
     <name>Camel Graph Visualization</name>
-    <version>1.0.1</version>
+    <version>1.0.4</version>
     <vendor email="gquadross@gmail.com" url="https://github.com/gquad">GQuad</vendor>
 
     <description><![CDATA[
@@ -17,7 +17,7 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <!-- Add your extensions here -->
-        <toolWindow id="CamelGraph" secondary="true" anchor="right"
+        <toolWindow id="CamelGraph" secondary="false" anchor="right"
                     factoryClass="com.example.camelgraph.ui.CamelGraphToolWindowFactory"/>
     </extensions>
 

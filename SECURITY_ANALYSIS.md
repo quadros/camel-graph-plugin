@@ -1,336 +1,168 @@
 # Análise de Segurança - Camel Graph Plugin
 
-**Data da Análise**: Janeiro 2025  
+**Data da Análise**: 2026-02-01  
 **Analista**: Expert em Segurança da Informação  
-**Versão Analisada**: 1.0-SNAPSHOT
+**Versão Analisada**: 1.0.5
 
 ---
 
 ## Resumo Executivo
 
-Esta análise identificou **3 vulnerabilidades críticas** e **2 vulnerabilidades de média severidade** no plugin. As principais preocupações são relacionadas a **Cross-Site Scripting (XSS)** e **exposição de informações sensíveis**. 
+O Camel Graph Plugin é um **plugin local** (IntelliJ/JBCefBrowser) que renderiza HTML/JS com dados extraídos do código do usuário. Por isso, o principal risco prático é **injeção de conteúdo/script (XSS) dentro do WebView do IDE** e **exposição de informações sensíveis** no grafo.
 
-**✅ ATUALIZAÇÃO (13/01/2025)**: Todas as vulnerabilidades identificadas foram **corrigidas** e validadas. Ver `SECURITY_VALIDATION_REPORT.md` para detalhes da validação.
+Nesta revisão (2026-02-01) não foram encontradas vulnerabilidades **críticas** evidentes no código atual. Foram identificados **2 riscos de severidade MÉDIA** e **2 riscos BAIXOS**, principalmente relacionados a:
 
-**Severidade Geral**: 🟢 **BAIXA** (após correções)
+- CSP com `unsafe-inline` (necessário hoje pela forma de geração do HTML)
+- Possível exposição de segredos presentes em URIs (ex.: credenciais embutidas)
+
+**Severidade Geral**: 🟡 **MÉDIA** (pela superfície XSS inerente a HTML/JS inline + risco de segredos em URIs)
 
 ---
 
-## Vulnerabilidades Identificadas
+## Vulnerabilidades / Riscos Identificados
 
-### 🔴 CRÍTICO - VUL-001: Cross-Site Scripting (XSS) via Interpolação de JSON
+### 🟡 MÉDIO - VUL-2026-001: CSP permissiva (`unsafe-inline`) aumenta impacto de XSS
 
-**Localização**: `GraphHtmlGenerator.kt:49`
+**Localização**: `src/main/kotlin/com/example/camelgraph/ui/GraphHtmlGenerator.kt` (meta CSP)
 
 **Descrição**:
-O JSON gerado pelo Gson é interpolado diretamente no HTML sem sanitização adequada. Embora o Gson escape caracteres especiais no JSON, a interpolação direta em template string pode ser explorada se houver falhas na serialização.
+O HTML gerado define CSP com `script-src 'unsafe-inline'` e `style-src 'unsafe-inline'`. Isso reduz a efetividade da CSP contra XSS, pois permite execução de scripts inline caso um payload consiga ser injetado.
 
-**Código Vulnerável**:
+**Código relevante**:
 ```kotlin
-elements: $elementsString
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
 ```
 
 **Impacto**:
-- Execução de código JavaScript arbitrário no contexto do plugin
-- Roubo de dados do projeto (código-fonte, credenciais)
-- Manipulação da interface do usuário
-- Potencial escalação para execução de código no sistema host
-
-**Exploração**:
-Se um desenvolvedor criar uma rota Camel com URI contendo payloads maliciosos:
-```java
-from("direct:start<script>alert('XSS')</script>")
-```
+- Se houver uma falha de sanitização futura, o payload teria mais chance de executar no WebView
 
 **Recomendação**:
-1. Usar escape adicional ou validação rigorosa
-2. Implementar Content Security Policy (CSP) no HTML
-3. Validar e sanitizar todos os dados antes da serialização
+- Migrar para scripts/estilos **não-inline**:
+  - carregar Cytoscape via `<script src="...">` (recurso local)
+  - mover o JS do grafo para um arquivo local (ex.: `/js/graph.js`)
+  - usar CSP sem `unsafe-inline` (ou com nonce gerado por render)
 
-**Prioridade**: 🔴 **CRÍTICA - Corrigir imediatamente**
-
-**Status**: ✅ **CORRIGIDO** - Ver `SECURITY_VALIDATION_REPORT.md` para detalhes
+**Prioridade**: 🟡 MÉDIA
 
 ---
 
-### 🔴 CRÍTICO - VUL-002: XSS via Mensagens de Erro
+### 🟡 MÉDIO - VUL-2026-002: Exposição potencial de segredos em URIs exibidas no grafo
 
-**Localização**: `CamelGraphToolWindowFactory.kt:90`
+**Localização**: `CamelPsiParser.kt` (extração de URI/label) + `GraphHtmlGenerator.kt` (exibição de labels)
 
 **Descrição**:
-Mensagens de exceção são interpoladas diretamente no HTML sem sanitização, permitindo injeção de código JavaScript através de stack traces ou mensagens de erro customizadas.
+URIs Camel podem conter informações sensíveis (ex.: `ftp://user:pass@host`, `?password=...`, `token=...`). O plugin exibe a URI (ou parte dela) como label do nó/edge. Mesmo sendo “local”, isso pode vazar segredos em:
 
-**Código Vulnerável**:
-```kotlin
-<pre>${e.message}</pre>
-```
+- screenshots / screen sharing
+- logs de suporte (prints)
+- gravações de tela
 
 **Impacto**:
-- Execução de código JavaScript arbitrário
-- Exposição de informações sensíveis via stack traces
-- Possível vazamento de caminhos de arquivos, nomes de classes, etc.
-
-**Exploração**:
-Se uma exceção contiver:
-```kotlin
-throw Exception("Error: <script>alert(document.cookie)</script>")
-```
+- Exposição de credenciais/tokens presentes no código (ou em constantes) para terceiros
 
 **Recomendação**:
-```kotlin
-import org.apache.commons.text.StringEscapeUtils
-// ou
-fun String.escapeHtml(): String = this
-    .replace("&", "&amp;")
-    .replace("<", "&lt;")
-    .replace(">", "&gt;")
-    .replace("\"", "&quot;")
-    .replace("'", "&#x27;")
+- Implementar **redação** (masking) em `SecurityUtils.sanitizeUri` e/ou `sanitizeLabel`, por exemplo:
+  - mascarar `user:pass@` em URIs
+  - mascarar query params típicos: `password`, `passwd`, `pwd`, `secret`, `token`, `apikey`, `key`
+  - opcional: preferir exibir apenas o “scheme + endpoint lógico” (ex.: `direct:foo`, `seda:bar`) e ocultar componentes sensíveis
 
-// Uso:
-<pre>${e.message?.escapeHtml() ?: "Unknown error"}</pre>
-```
-
-**Prioridade**: 🔴 **CRÍTICA - Corrigir imediatamente**
-
-**Status**: ✅ **CORRIGIDO** - Ver `SECURITY_VALIDATION_REPORT.md` para detalhes
+**Prioridade**: 🟡 MÉDIA
 
 ---
 
-### 🔴 CRÍTICO - VUL-003: Exposição de Informações Sensíveis (Caminhos de Arquivo)
+### 🟢 BAIXO - VUL-2026-003: JavaScript inline grande aumenta risco de regressão de sanitização
 
-**Localização**: `CamelPsiParser.kt:28,47,104` e `GraphModel.kt:7`
+**Localização**: `GraphHtmlGenerator.kt`
 
 **Descrição**:
-Caminhos completos de arquivos do sistema são armazenados e potencialmente expostos no grafo. Isso pode revelar:
-- Estrutura de diretórios do projeto
-- Nomes de usuário do sistema operacional
-- Informações sobre o ambiente de desenvolvimento
-- Possíveis caminhos para outros projetos
-
-**Código Vulnerável**:
-```kotlin
-val startNode = CamelNode(nodeId, uri, NodeType.ROUTE_START, filePath, getLineNumber(expression))
-// filePath contém caminho completo: /Users/username/projects/...
-```
-
-**Impacto**:
-- Vazamento de informações sobre estrutura do sistema
-- Identificação de usuários do sistema
-- Mapeamento de diretórios para ataques futuros
-- Violação de privacidade
+O HTML/JS é montado como uma string grande. Isso aumenta o risco de regressões (um futuro `innerHTML`, interpolação sem sanitização, etc.). Hoje não foi encontrado uso de `eval`, `innerHTML` ou `document.write`.
 
 **Recomendação**:
-1. Armazenar apenas caminhos relativos ao projeto
-2. Sanitizar caminhos antes de exibir
-3. Opcional: Permitir que usuário desabilite exibição de caminhos
+- Extrair JS do grafo para arquivo local versionado e testável (`/js/graph.js`)
+- Adicionar testes de sanitização (unit tests) para `SecurityUtils` e geração do JSON
 
-**Prioridade**: 🔴 **CRÍTICA - Corrigir antes do lançamento**
-
-**Status**: ✅ **CORRIGIDO** - Ver `SECURITY_VALIDATION_REPORT.md` para detalhes
+**Prioridade**: 🟢 BAIXA
 
 ---
 
-### 🟡 MÉDIO - VUL-004: Falta de Validação de Entrada
+### 🟢 BAIXO - VUL-2026-004: Performance/DoS local por grafos muito grandes
 
-**Localização**: `CamelPsiParser.kt:119-132`
+**Localização**: `GraphHtmlGenerator.kt` (loops de layout/packing e listeners)
 
 **Descrição**:
-URIs extraídas do código não são validadas antes de serem processadas e exibidas. URIs maliciosas ou extremamente longas podem causar:
-- Denial of Service (DoS)
-- Overflow de memória
-- Comportamento inesperado na visualização
-
-**Código Vulnerável**:
-```kotlin
-private fun extractUriArgument(expression: PsiMethodCallExpression): Pair<String, String> {
-    // Sem validação de tamanho ou conteúdo
-    return firstArg.text.replace("\"", "") to "Expression"
-}
-```
-
-**Impacto**:
-- Possível DoS com URIs muito longas
-- Comportamento inesperado com caracteres especiais
-- Problemas de performance
+Projetos com muitas rotas podem gerar grafos grandes. Embora existam limites de tamanho (`sanitizeUri` e `sanitizeLabel`), ainda há risco de “DoS local” (IDE lento) por layout/packing e quantidade de nós/edges.
 
 **Recomendação**:
-```kotlin
-private fun extractUriArgument(expression: PsiMethodCallExpression): Pair<String, String> {
-    val args = expression.argumentList.expressions
-    if (args.isNotEmpty()) {
-        val firstArg = args[0]
-        if (firstArg is PsiLiteralExpression) {
-            val value = firstArg.value
-            if (value is String) {
-                // Validar tamanho máximo
-                val sanitized = value.take(1000) // Limitar tamanho
-                return sanitized to "String"
-            }
-        }
-        // Limitar e sanitizar texto
-        val text = firstArg.text.replace("\"", "").take(1000)
-        return text to "Expression"
-    }
-    return "" to ""
-}
-```
+- Introduzir limites de render:
+  - cap de nós/edges renderizados (com mensagem “grafo muito grande”)
+  - opção de filtrar por pacote/classe/rota
+- Evitar re-layout completo quando usuário apenas arrasta containers
 
-**Prioridade**: 🟡 **MÉDIA - Corrigir na próxima versão**
-
-**Status**: ✅ **CORRIGIDO** - Ver `SECURITY_VALIDATION_REPORT.md` para detalhes
+**Prioridade**: 🟢 BAIXA
 
 ---
 
-### 🟡 MÉDIO - VUL-005: Uso de System.identityHashCode para IDs
+## Análise de Dependências (inventário)
 
-**Localização**: `CamelPsiParser.kt:94`
+**Nota**: esta revisão foi feita offline (sem consulta ativa a bases CVE). Recomenda-se rodar ferramentas automatizadas (Dependabot/OWASP Dependency Check) no pipeline.
 
-**Descrição**:
-Uso de `System.identityHashCode()` para gerar IDs pode causar colisões e comportamento imprevisível. Embora não seja uma vulnerabilidade de segurança direta, pode causar problemas de integridade de dados.
+### Kotlin `1.9.24`
+- **Status**: ⚠️ Não verificado automaticamente por CVE nesta execução
+- **Ação**: manter atualizado e monitorar advisories JetBrains
 
-**Código Vulnerável**:
-```kotlin
-val nodeId = "$methodName:$label:${System.identityHashCode(grandParent)}"
-```
+### Gson `2.10.1`
+- **Status**: ⚠️ Não verificado automaticamente por CVE nesta execução
+- **Ação**: manter atualizado e monitorar advisories
 
-**Impacto**:
-- Possíveis colisões de ID
-- Comportamento inesperado no grafo
-- Dificuldade de debugging
-
-**Recomendação**:
-Usar UUID ou hash determinístico:
-```kotlin
-import java.util.UUID
-val nodeId = UUID.randomUUID().toString()
-// ou hash determinístico baseado em conteúdo
-```
-
-**Prioridade**: 🟡 **MÉDIA - Melhorar na próxima versão**
-
-**Status**: ✅ **CORRIGIDO** - Ver `SECURITY_VALIDATION_REPORT.md` para detalhes
-
----
-
-## Análise de Dependências
-
-### Gson 2.10.1
-
-**Status**: ✅ Sem vulnerabilidades críticas conhecidas recentes
-
-**Recomendações**:
-- Manter atualizado
-- Monitorar CVE database regularmente
-- Considerar migração para versão mais recente se disponível
-
-### Cytoscape.js 3.28.1
-
-**Status**: ✅ Bundle local (sem dependência de CDN)
-
-**Observação**: Já foi resolvido o problema de CDN. O arquivo está incluído localmente.
+### Cytoscape.js (bundle local em `src/main/resources/js/cytoscape.min.js`)
+- **Status**: ⚠️ Não verificado automaticamente por CVE nesta execução
+- **Ação**:
+  - manter versão registrada/documentada
+  - atualizar periodicamente
+  - validar integridade (origem do bundle) antes de releases
 
 ---
 
 ## Boas Práticas de Segurança Implementadas
 
-✅ **Bundle Local de Bibliotecas**: Cytoscape.js incluído localmente, sem dependência de CDN  
-✅ **Isolamento de Contexto**: Plugin roda no contexto do IntelliJ, com isolamento adequado  
-✅ **Uso de PSI**: Parsing seguro através da API do IntelliJ, não regex vulnerável  
-✅ **Sem Autenticação Externa**: Não requer conexões externas ou autenticação
+✅ **Sem dependência de CDN**: Cytoscape.js incluído localmente  
+✅ **CSP presente** (ainda que permissiva por `unsafe-inline`)  
+✅ **Escape HTML** para labels/mensagens (`SecurityUtils.escapeHtml`)  
+✅ **Sanitização e limites de tamanho** (`sanitizeUri`, `sanitizeLabel`)  
+✅ **Sanitização de file paths** para reduzir exposição de dados do ambiente  
+✅ **Sem uso de `eval/innerHTML/document.write`** no código Kotlin/JS gerado
 
 ---
 
 ## Recomendações Gerais
 
-### Imediatas (Antes do Lançamento)
+### Imediatas (antes do próximo release)
+1. **Mask de segredos em URIs exibidas** (VUL-2026-002)
+2. **Automatizar varredura de dependências** (SCA) no pipeline
 
-1. **Implementar Sanitização HTML**:
-   - Criar função de escape para todos os dados interpolados em HTML
-   - Aplicar em todas as mensagens de erro e dados do grafo
+### Curto prazo (próxima versão)
+3. Remover `unsafe-inline` movendo scripts/estilos para arquivos locais (VUL-2026-001)
+4. Testes unitários para `SecurityUtils` e geração do JSON do grafo
 
-2. **Implementar Content Security Policy (CSP)**:
-   ```html
-   <meta http-equiv="Content-Security-Policy" 
-         content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
-   ```
-
-3. **Sanitizar Caminhos de Arquivo**:
-   - Converter caminhos absolutos para relativos
-   - Remover informações sensíveis (nomes de usuário, etc.)
-
-### Curto Prazo (Próxima Versão)
-
-4. **Validação de Entrada**:
-   - Limitar tamanho de URIs e labels
-   - Validar formato de dados antes do processamento
-
-5. **Melhorar Geração de IDs**:
-   - Usar UUID ou hash determinístico
-   - Garantir unicidade e previsibilidade
-
-6. **Logging Seguro**:
-   - Não logar informações sensíveis
-   - Sanitizar dados antes de logging
-
-### Médio Prazo
-
-7. **Testes de Segurança**:
-   - Implementar testes unitários para validação de entrada
-   - Testes de penetração básicos
-   - Análise estática de código (SAST)
-
-8. **Documentação de Segurança**:
-   - Adicionar seção de segurança no README
-   - Documentar processo de reporte de vulnerabilidades
+### Médio prazo
+5. Controles de tamanho do grafo (cap, filtros, paginação/virtualização)
 
 ---
 
 ## Plano de Ação Prioritário
 
-### Fase 1 - Crítico (Imediato)
-- [x] ✅ VUL-001: Implementar sanitização de JSON/HTML - **CORRIGIDO**
-- [x] ✅ VUL-002: Escapar mensagens de erro - **CORRIGIDO**
-- [x] ✅ VUL-003: Sanitizar caminhos de arquivo - **CORRIGIDO**
+### Fase 1 - Médio (prioritário)
+- [ ] VUL-2026-002: Redação de segredos em URIs/labels
+- [ ] VUL-2026-001: Remover `unsafe-inline` via scripts/estilos externos locais
 
-### Fase 2 - Médio (Próxima Versão)
-- [x] ✅ VUL-004: Implementar validação de entrada - **CORRIGIDO (Parcial)**
-- [x] ✅ VUL-005: Melhorar geração de IDs - **CORRIGIDO**
-- [x] ✅ Implementar CSP - **CORRIGIDO**
-
-### Fase 3 - Melhorias
-- [ ] Testes de segurança
-- [ ] Documentação de segurança
-- [ ] Auditoria de dependências
+### Fase 2 - Baixo (melhoria)
+- [ ] VUL-2026-004: Limites de render/layout para grafos grandes
+- [ ] VUL-2026-003: Refatorar JS inline para arquivo local + testes
 
 ---
 
 ## Conclusão
 
-**✅ ATUALIZAÇÃO (13/01/2025)**: Todas as vulnerabilidades críticas e médias identificadas foram **corrigidas e validadas**. 
+O plugin apresenta um bom baseline de segurança para um cenário local (IDE), com sanitização e sem dependências externas. O principal risco residual vem de **HTML/JS inline** (CSP permissiva) e da **possível exposição de segredos presentes em URIs**.
 
-**Validação Completa**: Ver `SECURITY_VALIDATION_REPORT.md` para análise detalhada da validação de segurança realizada seguindo o `SECURITY_AUDIT_PROMPT.md`.
-
-**Resumo da Validação**:
-- ✅ Todas as 5 vulnerabilidades identificadas foram corrigidas
-- ✅ Boas práticas de segurança implementadas
-- ✅ Dependências seguras e sem CVEs conhecidos
-- ✅ 0 vulnerabilidades críticas ou altas restantes
-- ⚠️ 1 vulnerabilidade baixa identificada (CSP unsafe-inline - aceitável)
-
-**Recomendação Final**: 🟢 **APROVADO PARA PRODUÇÃO**
-
-O plugin está seguro para uso em produção. Todas as vulnerabilidades críticas foram corrigidas e validadas seguindo as melhores práticas de segurança.
-
----
-
-## Contato para Reporte de Vulnerabilidades
-
-Se você encontrar vulnerabilidades adicionais, por favor reporte através de:
-- Email: [seu-email@exemplo.com]
-- GitHub Issues: [se aplicável]
-- Processo de reporte responsável de vulnerabilidades
-
----
-
-**Nota**: Esta análise foi realizada em Janeiro 2025. Recomenda-se reavaliação periódica conforme o código evolui.
+**Recomendação Final**: 🟡 **APROVADO COM RESSALVAS** (aplicar masking de segredos e melhorar CSP no próximo ciclo)

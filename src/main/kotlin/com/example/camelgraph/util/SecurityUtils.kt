@@ -43,6 +43,12 @@ object SecurityUtils {
         
         return sanitized
     }
+
+    /**
+     * Debug-only helper. In production code, avoid writing logs to disk unless strictly necessary.
+     * Kept intentionally minimal to reduce accidental sensitive data exposure.
+     */
+    // (no-op placeholder)
     
     /**
      * Validates and sanitizes URI strings
